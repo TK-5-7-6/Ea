@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|                                               CandlePatterns.mqh |
-//|                      Copyright © 2011, MetaQuotes Software Corp. |
+//|                      Copyright Â© 2011, MetaQuotes Software Corp. |
 //|                                        http://www.metaquotes.net |
 //|                                              Revision 2011.02.24 |
 //+------------------------------------------------------------------+
