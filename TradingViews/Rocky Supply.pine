@@ -1,0 +1,230 @@
+//@version=6
+indicator("Rocky's Dynamic DikFat Supply & Demand Zones", shorttitle="S&D Zones", overlay=true, max_boxes_count=500)
+
+/////////////////
+////  INPUTS ////
+/////////////////
+
+tf             = input.timeframe("", "Timeframe", group="🕒 Timeframe 🕒", tooltip="Select the timeframe for supply and demand zones.")
+plookright     = input.int(4, "Pivot Look Right", group="🖕 Pivots 🖕", tooltip="Number of bars to confirm pivot from the RIGHT.")
+plookleft      = input.int(4, "Pivot Look Left", group="🖕 Pivots 🖕", tooltip="Number of bars to confirm pivot from the LEFT.")
+sdbox_onf      = input.string("All Boxes", "What Boxes to Show", group="🟥 Supply & Demand Boxes 🟩", tooltip="Changes which Supply/Demand boxes will show.", options=["Current Only", "Historical Only", "All Boxes"])
+ponf           = input.bool(true, "Boxes On/Off?", group="🟥 Supply & Demand Boxes 🟩", tooltip="When toggled off, boxes will not plot.")
+pextend        = input.bool(false, "Extend Boxes to Current Bar?", group="🟥 Supply & Demand Boxes 🟩", tooltip="When toggled off, boxes extend to 4:00 PM of the creation day's session (9:30 AM–4:00 PM); when on, boxes extend to the current bar.")
+pupclr         = input.bool(true, "Update Past Box Colors?", group="🟥 Supply & Demand Boxes 🟩", tooltip="When toggled off, only the current days boxes will update colors.")
+pclrsup        = input.color(#00ff00, "Demand Box Border Color", group="🟥 Supply & Demand Boxes 🟩", tooltip="If price is above the box, this color will show for the border.")
+pclrres        = input.color(#ff0000, "Supply Box Border Color", group="🟥 Supply & Demand Boxes 🟩", tooltip="If price is below the box, this color will show for the border.")
+pclrneu        = input.color(color.white, "Neutral Box Border Color", group="🟥 Supply & Demand Boxes 🟩", tooltip="If price is inside the box, this color will show for the border.")
+pfillclr       = input.color(color.new(#00bcd4, 88), "Box Fill Color", group="🟥 Supply & Demand Boxes 🟩", tooltip="Fill color for supply and demand boxes, including opacity.")
+checkspan      = plookright + plookleft
+
+/////////////////////
+////  FUNCTIONS  ////
+/////////////////////
+
+xyvalbox(cond, src1) =>
+    x = ta.valuewhen(cond, time[plookright + 1], 0)
+    y1 = ta.valuewhen(cond, src1[plookright + 1], 0)
+    [x, y1]
+
+_getBox(_x, _y) =>
+    _box = array.get(_x, _y)
+    _l = box.get_left(_box)
+    _t = box.get_top(_box)
+    _r = box.get_right(_box)
+    _b = box.get_bottom(_box)
+    [_l, _t, _r, _b]
+
+_clearBoxArray(_array, oversize) =>
+    size = array.size(_array)
+    if size > oversize
+        box.delete(array.pop(_array))
+
+_clearIntArray(_array, oversize) =>
+    size = array.size(_array)
+    if size > oversize
+        array.pop(_array)
+
+_clearBoolArray(_array, oversize) =>
+    size = array.size(_array)
+    if size > oversize
+        array.pop(_array)
+
+//////////////////////////////
+////  PIVOT DATA  ////
+//////////////////////
+
+// Fetch high and low from the selected timeframe
+tf_high = request.security(syminfo.tickerid, tf, high, lookahead=barmerge.lookahead_on)
+tf_low = request.security(syminfo.tickerid, tf, low, lookahead=barmerge.lookahead_on)
+
+// Detect pivot highs and lows on the selected timeframe
+pivot_high = ta.pivothigh(tf_high, plookleft, plookright)
+pivot_low = ta.pivotlow(tf_low, plookleft, plookright)
+bool check_ph = not na(pivot_high[1])  // True if a pivot high was detected 1 bar ago
+bool check_pl = not na(pivot_low[1])   // True if a pivot low was detected 1 bar ago
+bool ph = check_ph
+bool pl = check_pl
+[ph_time, ph_high] = xyvalbox(ph, tf_high)
+[pl_time, pl_low] = xyvalbox(pl, tf_low)
+
+////////////////////////////////
+////  TIME & SECURITY DATA  ////
+////////////////////////////////
+
+f_getDayEndTime(_time) =>
+    day_start = time("D")
+    session_end = day_start + 57600000
+    is_after_session = hour(_time) >= 16
+    is_weekend = dayofweek(_time) == dayofweek.saturday or dayofweek(_time) == dayofweek.sunday
+    if is_after_session or is_weekend
+        next_day = day_start + 86400000
+        while dayofweek(next_day) == dayofweek.saturday or dayofweek(next_day) == dayofweek.sunday
+            next_day := next_day + 86400000
+        session_end := next_day + 57600000
+    session_end
+
+////////////////////////
+////  PLOTTING BOX  ////
+////////////////////////
+
+var box[] box_boxes = array.new<box>(0)
+var int[] box_times = array.new<int>(0)
+var bool[] box_visible = array.new<bool>(0)
+var bool[] box_crossed = array.new<bool>(0)
+var int[] box_session_ends = array.new<int>(0)
+
+_plotBox(_times, _boxes, _visible, _crossed, _session_ends) =>
+    bool ph_qplbox = false
+    bool pl_qplbox = false
+    for i = 0 to checkspan
+        if ph[i] and (ph_time > time[checkspan])
+            ph_qplbox := true
+    for n = 0 to checkspan
+        if pl[n] and (pl_time > time[checkspan])
+            pl_qplbox := true
+    bool qplbox = ph_qplbox and pl_qplbox
+    
+    var box last_box = na
+    int plbox_left = ph_time >= pl_time ? pl_time : ph_time < pl_time ? ph_time : time
+    bool plbox_outside = na(last_box) ? true : (ph_high > box.get_top(last_box) and pl_low > box.get_top(last_box)) or (ph_high < box.get_bottom(last_box) and pl_low < box.get_bottom(last_box))
+    bool box_cond = qplbox and plbox_outside and ponf
+    
+    if box_cond
+        int right_edge = pextend ? time : f_getDayEndTime(time)
+        new_box = box.new(plbox_left, ph_high, right_edge, pl_low, xloc=xloc.bar_time, border_color=pclrneu, bgcolor=pfillclr, border_width=2)
+        array.unshift(_boxes, new_box)
+        array.unshift(_times, time)
+        array.unshift(_visible, true)
+        array.unshift(_crossed, false)
+        array.unshift(_session_ends, right_edge)
+        last_box := new_box
+        
+        size = array.size(_boxes)
+        if size > 1
+            for i = 1 to size - 1
+                existing_box = array.get(_boxes, i)
+                existing_top = box.get_top(existing_box)
+                existing_bottom = box.get_bottom(existing_box)
+                if (ph_high <= existing_top and pl_low >= existing_bottom) or (ph_high >= existing_bottom and pl_low <= existing_top) or (ph_high >= existing_bottom and ph_high <= existing_top) or (pl_low <= existing_top and pl_low >= existing_bottom)
+                    array.set(_visible, i, false)
+                    box.set_bgcolor(existing_box, na)
+                    box.set_border_color(existing_box, na)
+
+_boxExtend(_a, _session_ends, cond) =>
+    size = array.size(_a)
+    if cond
+        for i = 0 to (size > 0 ? size - 1 : na)
+            box.set_right(array.get(_a, i), time)
+    else
+        for i = 0 to (size > 0 ? size - 1 : na)
+            box.set_right(array.get(_a, i), array.get(_session_ends, i))
+
+_boxColor(_times, _boxes, _visible, _crossed) =>
+    size = array.size(_times)
+    for i = 0 to (size > 0 ? size - 1 : na)
+        if array.get(_visible, i)
+            current_box = array.get(_boxes, i)
+            top = box.get_top(current_box)
+            bottom = box.get_bottom(current_box)
+            up = close > top
+            dn = close < bottom
+            in_box = close <= top and close >= bottom
+            crossed = array.get(_crossed, i)
+            
+            if not crossed
+                entered_from_top = close[1] > top and close <= top and close >= bottom
+                entered_from_bottom = close[1] < bottom and close >= bottom and close <= top
+                if in_box
+                    if entered_from_top
+                        box.set_bottom(current_box, close)
+                    else if entered_from_bottom
+                        box.set_top(current_box, close)
+                
+                crossed_from_top_to_bottom = close[1] >= bottom and close < bottom
+                crossed_from_bottom_to_top = close[1] <= top and close > top
+                if crossed_from_top_to_bottom or crossed_from_bottom_to_top
+                    array.set(_crossed, i, true)
+            
+            plot_current = array.get(_times, i) >= time("D")
+            plot_historical = array.get(_times, i) < time("D")
+            switch sdbox_onf
+                "Current Only" =>
+                    if plot_current
+                        switch
+                            up =>
+                                box.set_bgcolor(array.get(_boxes, i), pfillclr)
+                                box.set_border_color(array.get(_boxes, i), pclrsup)
+                            dn =>
+                                box.set_bgcolor(array.get(_boxes, i), pfillclr)
+                                box.set_border_color(array.get(_boxes, i), pclrres)
+                            =>
+                                box.set_bgcolor(array.get(_boxes, i), pfillclr)
+                                box.set_border_color(array.get(_boxes, i), pclrneu)
+                    else
+                        box.set_bgcolor(array.get(_boxes, i), na)
+                        box.set_border_color(array.get(_boxes, i), na)
+                "Historical Only" =>
+                    if plot_historical and pupclr
+                        switch
+                            up =>
+                                box.set_bgcolor(array.get(_boxes, i), pfillclr)
+                                box.set_border_color(array.get(_boxes, i), pclrsup)
+                            dn =>
+                                box.set_bgcolor(array.get(_boxes, i), pfillclr)
+                                box.set_border_color(array.get(_boxes, i), pclrres)
+                            =>
+                                box.set_bgcolor(array.get(_boxes, i), pfillclr)
+                                box.set_border_color(array.get(_boxes, i), pclrneu)
+                    else
+                        box.set_bgcolor(array.get(_boxes, i), na)
+                        box.set_border_color(array.get(_boxes, i), na)
+                "All Boxes" =>
+                    if plot_historical and not pupclr
+                        box.set_bgcolor(array.get(_boxes, i), na)
+                        box.set_border_color(array.get(_boxes, i), na)
+                    else
+                        switch
+                            up =>
+                                box.set_bgcolor(array.get(_boxes, i), pfillclr)
+                                box.set_border_color(array.get(_boxes, i), pclrsup)
+                            dn =>
+                                box.set_bgcolor(array.get(_boxes, i), pfillclr)
+                                box.set_border_color(array.get(_boxes, i), pclrres)
+                            =>
+                                box.set_bgcolor(array.get(_boxes, i), pfillclr)
+                                box.set_border_color(array.get(_boxes, i), pclrneu)
+
+_plotBox(box_times, box_boxes, box_visible, box_crossed, box_session_ends)
+_boxExtend(box_boxes, box_session_ends, pextend)
+_boxColor(box_times, box_boxes, box_visible, box_crossed)
+
+/////////////////////////
+////  ARRAY CLEANUP  ////
+/////////////////////////
+
+_clearBoxArray(box_boxes, 200)
+_clearIntArray(box_times, 200)
+_clearBoolArray(box_visible, 200)
+_clearBoolArray(box_crossed, 200)
+_clearIntArray(box_session_ends, 200)
