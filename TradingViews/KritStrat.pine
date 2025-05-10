@@ -1,0 +1,121 @@
+//@version=6
+strategy("Kripto Stratejisi v2.2 (TP Ekli)", overlay=true, shorttitle="KripStratTP", initial_capital=1000, default_qty_type=strategy.cash, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.01, slippage=3)
+import TradingView/ta/10
+
+// === GİRDİLER ===
+// EMA Ayarları
+grp_ema = "EMA Ayarları"
+inp_ema_short_len = input.int(20, title="Kısa EMA Periyodu", group=grp_ema, minval=1)
+inp_ema_long_len = input.int(35, title="Uzun EMA Periyodu", group=grp_ema, minval=1)
+
+// Ichimoku Ayarları
+grp_ichimoku = "Ichimoku Ayarları"
+inp_tenkan_len = input.int(9, title="Tenkan-sen Periyodu", group=grp_ichimoku, minval=1)
+inp_kijun_len = input.int(26, title="Kijun-sen Periyodu (ve Kumo İteleme)", group=grp_ichimoku, minval=1)
+inp_senkou_b_len = input.int(52, title="Senkou Span B Periyodu", group=grp_ichimoku, minval=1)
+
+// MACD Ayarları
+grp_macd = "MACD Ayarları"
+inp_macd_fast_len = input.int(12, title="MACD Hızlı Uzunluk", group=grp_macd, minval=1)
+inp_macd_slow_len = input.int(26, title="MACD Yavaş Uzunluk", group=grp_macd, minval=1)
+inp_macd_signal_len = input.int(9, title="MACD Sinyal Uzunluğu", group=grp_macd, minval=1)
+
+// ATR, Stop Loss ve Kar Al Ayarları
+grp_atr = "ATR, SL & TP Ayarları" // Grup adı güncellendi
+inp_atr_len = input.int(14, title="ATR Periyodu", group=grp_atr, minval=1)
+inp_atr_sl_multiplier = input.float(3.0, title="ATR Stop Loss Çarpanı", group=grp_atr, minval=0.1, step=0.1)
+inp_use_take_profit = input.bool(true, title="Kar Al Kullan", group=grp_atr) // TP Kullanımı eklendi
+inp_tp_rr_ratio = input.float(1.5, title="Kar Al Risk/Kazanç Oranı (SL'e göre)", tooltip="Örn: 1.5 ise, TP hedefi SL mesafesinin 1.5 katı olur. 2 ise 2 katı olur.", group=grp_atr, minval=0.1, step=0.1) // TP R:R oranı eklendi
+
+// Volatilite Filtresi Ayarları
+grp_volatility = "Volatilite Filtresi"
+inp_use_volatility_filter = input.bool(false, title="Volatilite Filtresini Kullan (Varsayılan: Kapalı)", group=grp_volatility) // Varsayılan false yapıldı
+inp_vol_atr_len = input.int(14, title="Volatilite ATR Periyodu", group=grp_volatility, minval=1)
+inp_vol_atr_sma_len = input.int(20, title="Volatilite ATR SMA Periyodu", group=grp_volatility, minval=1)
+inp_vol_threshold_multiplier = input.float(0.5, title="Min. ATR / ATR SMA Eşiği", group=grp_volatility, minval=0.1, step=0.1)
+
+// Hacim Filtresi Ayarları
+grp_volume = "Hacim Filtresi"
+inp_use_volume_filter = input.bool(false, title="Hacim Filtresini Kullan (Varsayılan: Kapalı)", group=grp_volume) // Varsayılan false yapıldı
+inp_vol_sma_len = input.int(20, title="Hacim SMA Periyodu", group=grp_volume, minval=1)
+
+// HTF Trend Filtresi Ayarları
+grp_htf = "HTF Trend Filtresi"
+inp_use_htf_filter = input.bool(true, title="HTF Trend Filtresini Kullan (Varsayılan: Açık)", group=grp_htf) // Varsayılan true kaldı
+inp_htf1_res = input.timeframe("D", title="HTF 1 Çözünürlüğü", group=grp_htf)
+inp_htf1_ema_len = input.int(21, title="HTF 1 EMA Periyodu", group=grp_htf, minval=1)
+inp_htf2_res = input.timeframe("240", title="HTF 2 Çözünürlüğü", group=grp_htf) // 4 Saat
+inp_htf2_ema_len = input.int(50, title="HTF 2 EMA Periyodu", group=grp_htf, minval=1)
+
+
+// === HESAPLAMALAR ===
+ema_short = ta.ema(close, inp_ema_short_len)
+ema_long = ta.ema(close, inp_ema_long_len)
+plot(ema_short, "Kısa EMA", color.blue, display=display.none)
+plot(ema_long, "Uzun EMA", color.orange, display=display.none)
+
+[conversionLine, baseLine, leadingSpanA, leadingSpanB, laggingSpan] = ta.ichimoku(inp_tenkan_len, inp_kijun_len, inp_senkou_b_len) //ta.ichimoku(inp_tenkan_len, inp_kijun_len, inp_senkou_b_len)
+price_above_kumo = close > leadingSpanA[inp_kijun_len] and close > leadingSpanB[inp_kijun_len]
+price_below_kumo = close < leadingSpanA[inp_kijun_len] and close < leadingSpanB[inp_kijun_len]
+plot_spanA = plot(leadingSpanA, "Senkou A", color.new(color.green, 100), offset = inp_kijun_len, display=display.none)
+plot_spanB = plot(leadingSpanB, "Senkou B", color.new(color.red, 100), offset = inp_kijun_len, display=display.none)
+fill(plot_spanA, plot_spanB, color = leadingSpanA > leadingSpanB ? color.new(color.green, 90) : color.new(color.red, 90), title="Kumo Bulutu", display=display.none)
+
+[macdLine, signalLine, hist] = ta.macd(close, inp_macd_fast_len, inp_macd_slow_len, inp_macd_signal_len)
+atr_val = ta.atr(inp_atr_len)
+
+vol_atr_val_calc = ta.atr(inp_vol_atr_len)
+vol_atr_sma_calc = ta.sma(vol_atr_val_calc, inp_vol_atr_sma_len)
+vol_atr_val = inp_use_volatility_filter ? vol_atr_val_calc : na
+vol_atr_sma = inp_use_volatility_filter ? vol_atr_sma_calc : na
+is_volatile_enough = not inp_use_volatility_filter or (not na(vol_atr_val) and not na(vol_atr_sma) and vol_atr_val > vol_atr_sma * inp_vol_threshold_multiplier)
+
+volume_sma_calc = ta.sma(volume, inp_vol_sma_len)
+is_volume_sufficient = not inp_use_volume_filter or (volume > volume_sma_calc)
+
+htf1_close_raw = request.security(syminfo.tickerid, inp_htf1_res, close, lookahead=barmerge.lookahead_off)
+htf2_close_raw = request.security(syminfo.tickerid, inp_htf2_res, close, lookahead=barmerge.lookahead_off)
+htf1_ema_calc = ta.ema(htf1_close_raw, inp_htf1_ema_len)
+htf2_ema_calc = ta.ema(htf2_close_raw, inp_htf2_ema_len)
+htf1_close = inp_use_htf_filter ? htf1_close_raw : na
+htf1_ema = inp_use_htf_filter and not na(htf1_close) ? htf1_ema_calc : na
+htf2_close = inp_use_htf_filter ? htf2_close_raw : na
+htf2_ema = inp_use_htf_filter and not na(htf2_close) ? htf2_ema_calc : na
+is_htf1_bullish = inp_use_htf_filter ? (not na(htf1_close) and not na(htf1_ema) and htf1_close > htf1_ema) : true
+is_htf1_bearish = inp_use_htf_filter ? (not na(htf1_close) and not na(htf1_ema) and htf1_close < htf1_ema) : true
+is_htf2_bullish = inp_use_htf_filter ? (not na(htf2_close) and not na(htf2_ema) and htf2_close > htf2_ema) : true
+is_htf2_bearish = inp_use_htf_filter ? (not na(htf2_close) and not na(htf2_ema) and htf2_close < htf2_ema) : true
+htf_trend_bullish = not inp_use_htf_filter or (is_htf1_bullish and is_htf2_bullish)
+htf_trend_bearish = not inp_use_htf_filter or (is_htf1_bearish and is_htf2_bearish)
+
+base_long_condition = ta.crossover(ema_short, ema_long) and price_above_kumo and macdLine > signalLine
+base_short_condition = ta.crossunder(ema_short, ema_long) and price_below_kumo and macdLine < signalLine
+long_signal = base_long_condition and is_volatile_enough and is_volume_sufficient and htf_trend_bullish
+short_signal = base_short_condition and is_volatile_enough and is_volume_sufficient and htf_trend_bearish
+
+// === STRATEJİ İŞLEM MANTIĞI ===
+// Stop Loss ve Kar Al Mesafeleri (ATR tabanlı)
+sl_distance = atr_val * inp_atr_sl_multiplier
+tp_distance = inp_use_take_profit ? sl_distance * inp_tp_rr_ratio : na // Eğer TP kullanılmıyorsa mesafe 'na' olacak
+
+// Giriş Anındaki Stop Loss ve Kar Al Fiyatları
+long_entry_sl_price = close - sl_distance
+long_entry_tp_price = inp_use_take_profit ? close + tp_distance : na // Eğer TP kullanılmıyorsa fiyat 'na'
+
+short_entry_sl_price = close + sl_distance
+short_entry_tp_price = inp_use_take_profit ? close - tp_distance : na // Eğer TP kullanılmıyorsa fiyat 'na'
+
+// ALIM (LONG) İŞLEMİ
+if (long_signal)
+    if (strategy.position_size < 0) // Eğer mevcut bir satış pozisyonu varsa, önce onu kapat
+        strategy.close(id="S", comment="Ters Sinyal Kapat Satış")
+    strategy.entry(id="L", direction=strategy.long, comment="Alış")
+    // 'limit' argümanına 'na' değeri geçilirse, o emir türü (TP) dikkate alınmaz.
+    strategy.exit(id="LX", from_entry="L", stop=long_entry_sl_price, limit=long_entry_tp_price, comment_profit="TP Alış", comment_loss="SL Alış")
+
+// SATIŞ (SHORT) İŞLEMİ
+if (short_signal)
+    if (strategy.position_size > 0) // Eğer mevcut bir alım pozisyonu varsa, önce onu kapat
+        strategy.close(id="L", comment="Ters Sinyal Kapat Alış")
+    strategy.entry(id="S", direction=strategy.short, comment="Satış")
+    strategy.exit(id="SX", from_entry="S", stop=short_entry_sl_price, limit=short_entry_tp_price, comment_profit="TP Satış", comment_loss="SL Satış")
