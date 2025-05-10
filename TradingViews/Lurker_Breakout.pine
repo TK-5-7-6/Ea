@@ -1,0 +1,577 @@
+//@version=6
+// The_lurker فواز العنزي
+
+indicator('Smart FlexRange Breakout [The_lurker]', overlay=true)
+
+// ============================================================================
+// 1. استيراد المكتبات | Import Libraries
+// ============================================================================
+import n00btraders/Timezone/1 as tz
+import The_lurker/AllCandlestickPatternsLibrary/1 as candlestick
+
+// ============================================================================
+// 2. إدخالات المستخدم | User Inputs
+// ============================================================================
+market = input.string("Crypto", 'Market', options=["Crypto", "Forex", "Gold", "US", "London", "Tokyo", "Sydney", "Hong Kong"], 
+                     tooltip="العربية: اختر السوق أو البورصة. | English: Select the market or exchange.")
+searchHours = input.int(3, 'Search Hours', minval=1, maxval=6, 
+                       tooltip="العربية: عدد الساعات للبحث عن الشمعات. | English: Number of hours to search for candles.")
+timeframe = input.string("30", 'Timeframe', options=["15", "30", "60"], 
+                         tooltip="العربية: اختر الإطار الزمني للشمعات. | English: Select the timeframe for candles.")
+tpOffset = input.int(20, 'TP Offset', minval=1, 
+                     tooltip="العربية: الإزاحة الزمنية لتسميات أهداف جني الأرباح. | English: Time offset for take-profit labels.")
+maxLineExtension = input.int(20, 'Max Line Extension', minval=1, 
+                             tooltip="العربية: الحد الأقصى لتمدد الخطوط. | English: Maximum extension of lines.")
+tpPercentage = input.float(0.6, 'TP Percentage (%)', minval=0.1, step=0.1, 
+                           tooltip="العربية: النسبة المئوية لأهداف جني الأرباح. | English: Percentage for take-profit targets.")
+timezone = input.enum(tz.Timezone.KUWAIT, 'Timezone', 
+                     tooltip="العربية: اختر المنطقة الزمنية. | English: Select the timezone.")
+
+// تمكين/تعطيل مستويات TP | Enable/Disable TP Levels
+enableTP1 = input.bool(true, 'Enable TP1')
+enableTP2 = input.bool(true, 'Enable TP2')
+enableTP3 = input.bool(true, 'Enable TP3')
+enableTP4 = input.bool(true, 'Enable TP4')
+enableTP5 = input.bool(false, 'Enable TP5')
+enableTP6 = input.bool(false, 'Enable TP6')
+enableTP7 = input.bool(false, 'Enable TP7')
+enableTP8 = input.bool(false, 'Enable TP8')
+
+// الألوان والأنماط | Colors and patterns
+upperLineColor = input.color(color.green, 'Upper Line Color')
+lowerLineColor = input.color(color.red, 'Lower Line Color')
+tpLineColor = input.color(#26C6DA, 'TP Line Color')
+lineStyle = input.string("solid", 'Line Style', options=["solid", "dashed", "dotted"])
+lineWidth = input.int(1, 'Line Width', minval=1, maxval=5)
+labelSize = input.string("small", 'Label Size', options=["tiny", "small", "normal", "large", "huge"])
+
+// ============================================================================
+// 3. حسابات الوقت والتوقيت | Time and Timezone Calculations
+// ============================================================================
+marketStartHour = market == "Crypto" ? 3 : market == "Forex" ? 0 : market == "Gold" ? 1 : market == "US" ? 8 : market == "London" ? 8 : market == "Tokyo" ? 0 : market == "Sydney" ? 22 : market == "Hong Kong" ? 1 : 0
+marketStartMinute = 0
+timeframeMinutes = timeframe == "15" ? 15 : timeframe == "30" ? 30 : 60
+candleCountMax = math.floor(searchHours * 60 / timeframeMinutes)
+
+// الكشف المستند إلى الوقت | Time-based detection
+localHour = hour(time, timezone.tostring())
+localMinute = minute(time, timezone.tostring())
+isWithinPeriod = localHour >= marketStartHour and localHour < marketStartHour + searchHours
+isStartOfPeriod = localHour == marketStartHour and localMinute == marketStartMinute
+isAfterPeriod = localHour >= marketStartHour + searchHours
+
+// ============================================================================
+// 4. جلب بيانات الإطار الزمني | Fetch Timeframe Data
+// ============================================================================
+symbol = syminfo.ticker
+tf = timeframe
+open_tf = request.security(symbol, tf, open, lookahead=barmerge.lookahead_on)
+high_tf = request.security(symbol, tf, high, lookahead=barmerge.lookahead_on)
+low_tf = request.security(symbol, tf, low, lookahead=barmerge.lookahead_on)
+close_tf = request.security(symbol, tf, close, lookahead=barmerge.lookahead_on)
+volume_tf = request.security(symbol, tf, volume, lookahead=barmerge.lookahead_on)
+hl2_tf = request.security(symbol, tf, hl2, lookahead=barmerge.lookahead_on)
+
+// ============================================================================
+// 5. الكشف عن الشموع الجديدة | Detect New Candles
+// ============================================================================
+new_candle = ta.change(time(tf)) != 0
+
+// ============================================================================
+// 6. تخزين الشموع | Store Candles
+// ============================================================================
+var array<float> candleOpen = array.new_float(candleCountMax, na)
+var array<float> candleHigh = array.new_float(candleCountMax, na)
+var array<float> candleLow = array.new_float(candleCountMax, na)
+var array<float> candleClose = array.new_float(candleCountMax, na)
+var array<float> candleVolume = array.new_float(candleCountMax, na)
+var array<int> candleIndex = array.new_int(candleCountMax, na)
+var array<float> candleScores = array.new_float(candleCountMax, na)
+
+// متغيرات لتتبع معلومات الشموع | Variables for tracking candle information
+var int candleCount = 0
+var bool candleProcessed = false
+var float fixedImpHigh = na
+var float fixedImpLow = na
+var int fixedImpIndex = na
+var int importantCandleIndex = na
+
+// ============================================================================
+// 7. الإعدادات والمتغيرات العامة | General Settings and Variables
+// ============================================================================
+var line upperLine = na
+var line lowerLine = na
+var line middleLine = na
+var label upperValueLabel = na
+var label lowerValueLabel = na
+var label buySignalLabel = na
+var label sellSignalLabel = na
+
+var array<line> tpLinesUp = array.new_line(8, na)
+var array<line> tpLinesDown = array.new_line(8, na)
+var array<label> tpLabelsUp = array.new_label(8, na)
+var array<label> tpLabelsDown = array.new_label(8, na)
+var array<bool> tpEnabled = array.new_bool(8, false)
+
+// تهيئة مصفوفة TP الممكّنة | Configure the enabled TP array
+array.set(tpEnabled, 0, enableTP1)
+array.set(tpEnabled, 1, enableTP2)
+array.set(tpEnabled, 2, enableTP3)
+array.set(tpEnabled, 3, enableTP4)
+array.set(tpEnabled, 4, enableTP5)
+array.set(tpEnabled, 5, enableTP6)
+array.set(tpEnabled, 6, enableTP7)
+array.set(tpEnabled, 7, enableTP8)
+
+// اختيار حجم التسمية ونمط الخط | Choose label size and font style.
+labelSizeSelected = labelSize == "tiny" ? size.tiny : labelSize == "small" ? size.small : labelSize == "normal" ? size.normal : labelSize == "large" ? size.large : size.huge
+lineStyleSelected = lineStyle == "solid" ? line.style_solid : lineStyle == "dashed" ? line.style_dashed : line.style_dotted
+
+// ============================================================================
+// 8. حساب أهمية الشموع | Calculate Candle Importance
+// ============================================================================
+sma50_tf = request.security(symbol, tf, ta.sma(close, 50), lookahead=barmerge.lookahead_on)
+sma200_tf = request.security(symbol, tf, ta.sma(close, 200), lookahead=barmerge.lookahead_on)
+body_tf = math.abs(close_tf - open_tf)
+emaBody_tf = request.security(symbol, tf, ta.ema(body_tf, 14), lookahead=barmerge.lookahead_on)
+
+[C_BodyHi, C_BodyLo, C_Body, C_SmallBody, C_LongBody, C_UpShadow, C_DnShadow, C_HasUpShadow, C_HasDnShadow, C_WhiteBody, C_BlackBody, C_Range, C_IsInsideBar, C_BodyMiddle, C_ShadowEquals, C_IsDojiBody, C_Doji] = candlestick.calculateCandleProperties(open_tf, close_tf, high_tf, low_tf, emaBody_tf, 10.0, 10.0, 10.0)
+[C_DownTrend, C_UpTrend] = candlestick.detectTrend(false, false, "*r", close_tf, sma50_tf, sma200_tf)
+
+f_calculateImportanceScore(candleOpen, candleHigh, candleLow, candleClose, candleVolume) =>
+    [bodyHi, bodyLo, body, smallBody, longBody, upShadow, dnShadow, hasUpShadow, hasDnShadow, whiteBody, blackBody, candleRange, isInsideBar, bodyMiddle, shadowEquals, isDojiBody, doji] = candlestick.calculateCandleProperties(candleOpen, candleClose, candleHigh, candleLow, emaBody_tf, 10.0, 10.0, 10.0)
+    [downTrend, upTrend] = candlestick.detectTrend(false, false, "SMA50, SMA200", candleClose, sma50_tf, sma200_tf)
+    [engulfingBullish, _, _, _] = candlestick.detectEngulfingBullish(downTrend, whiteBody, longBody, blackBody, smallBody, candleClose, candleOpen)
+    [hammerBullish, _, _, _] = candlestick.detectHammerBullish(smallBody, body, bodyLo, hl2_tf, dnShadow, 2.0, hasUpShadow, downTrend)
+    [invertedHammerBullish, _, _, _] = candlestick.detectInvertedHammerBullish(smallBody, body, bodyHi, hl2_tf, upShadow, 2.0, hasDnShadow, downTrend)
+    [piercingBullish, _, _, _] = candlestick.detectPiercingBullish(downTrend, blackBody, longBody, whiteBody, candleOpen, candleLow, candleClose, bodyMiddle)
+    [morningStarBullish, _, _, _] = candlestick.detectMorningStarBullish(longBody, smallBody, downTrend, blackBody, whiteBody, bodyHi, bodyLo, bodyMiddle)
+    [morningDojiStarBullish, _, _, _] = candlestick.detectMorningDojiStarBullish(longBody, isDojiBody, downTrend, blackBody, whiteBody, bodyHi, bodyLo, bodyMiddle)
+    [dojiStarBullish, _, _, _] = candlestick.detectDojiStarBullish(downTrend, blackBody, longBody, isDojiBody, bodyHi, bodyLo)
+    [tweezerBottomBullish, _, _, _] = candlestick.detectTweezerBottomBullish(downTrend, isDojiBody, hasUpShadow, hasDnShadow, candleLow, emaBody_tf, blackBody, whiteBody, longBody)
+    [haramiBullish, _, _, _] = candlestick.detectHaramiBullish(longBody, blackBody, downTrend, whiteBody, smallBody, candleHigh, candleLow, bodyHi, bodyLo)
+    [haramiCrossBullish, _, _, _] = candlestick.detectHaramiCrossBullish(longBody, blackBody, downTrend, isDojiBody, candleHigh, candleLow, bodyHi, bodyLo)
+    [dragonflyDojiBullish, _, _, _] = candlestick.detectDragonflyDojiBullish(isDojiBody, upShadow, body)
+    [abandonedBabyBullish, _, _, _] = candlestick.detectAbandonedBabyBullish(downTrend, blackBody, whiteBody, candleLow, candleHigh, isDojiBody)
+    [triStarBullish, _, _, _] = candlestick.detectTriStarBullish(doji, downTrend, bodyHi, bodyLo)
+    [engulfingBearish, _, _, _] = candlestick.detectEngulfingBearish(upTrend, blackBody, longBody, whiteBody, smallBody, candleClose, candleOpen)
+    [shootingStarBearish, _, _, _] = candlestick.detectShootingStarBearish(smallBody, body, bodyHi, hl2_tf, upShadow, 2.0, hasDnShadow, upTrend)
+    [hangingManBearish, _, _, _] = candlestick.detectHangingManBearish(smallBody, body, bodyLo, hl2_tf, dnShadow, 2.0, hasUpShadow, upTrend)
+    [darkCloudCoverBearish, _, _, _] = candlestick.detectDarkCloudCoverBearish(upTrend, whiteBody, longBody, blackBody, candleOpen, candleHigh, candleClose, bodyMiddle)
+    [eveningStarBearish, _, _, _] = candlestick.detectEveningStarBearish(longBody, smallBody, upTrend, whiteBody, blackBody, bodyLo, bodyHi, bodyMiddle)
+    [eveningDojiStarBearish, _, _, _] = candlestick.detectEveningDojiStarBearish(longBody, isDojiBody, upTrend, whiteBody, blackBody, bodyLo, bodyHi, bodyMiddle)
+    [dojiStarBearish, _, _, _] = candlestick.detectDojiStarBearish(upTrend, whiteBody, longBody, isDojiBody, bodyLo, bodyHi)
+    [tweezerTopBearish, _, _, _] = candlestick.detectTweezerTopBearish(upTrend, isDojiBody, hasUpShadow, hasDnShadow, candleHigh, emaBody_tf, whiteBody, blackBody, longBody)
+    [haramiBearish, _, _, _] = candlestick.detectHaramiBearish(longBody, whiteBody, upTrend, blackBody, smallBody, candleHigh, candleLow, bodyHi, bodyLo)
+    [haramiCrossBearish, _, _, _] = candlestick.detectHaramiCrossBearish(longBody, whiteBody, upTrend, isDojiBody, candleHigh, candleLow, bodyHi, bodyLo)
+    [gravestoneDojiBearish, _, _, _] = candlestick.detectGravestoneDojiBearish(isDojiBody, dnShadow, body)
+    [abandonedBabyBearish, _, _, _] = candlestick.detectAbandonedBabyBearish(upTrend, whiteBody, blackBody, candleHigh, candleLow, isDojiBody)
+    [triStarBearish, _, _, _] = candlestick.detectTriStarBearish(doji, upTrend, bodyHi, bodyLo)
+    
+    bool isBullishReversal = engulfingBullish or hammerBullish or invertedHammerBullish or piercingBullish or morningStarBullish or morningDojiStarBullish or dojiStarBullish or tweezerBottomBullish or haramiBullish or haramiCrossBullish or dragonflyDojiBullish or abandonedBabyBullish or triStarBullish
+    bool isBearishReversal = engulfingBearish or shootingStarBearish or hangingManBearish or darkCloudCoverBearish or eveningStarBearish or eveningDojiStarBearish or dojiStarBearish or tweezerTopBearish or haramiBearish or haramiCrossBearish or gravestoneDojiBearish or abandonedBabyBearish or triStarBearish
+    bool isReversal = isBullishReversal or isBearishReversal
+    
+    float importanceScore = isReversal ? 100 : 0
+    float volumeScore = 0
+    var float maxVolume = candleVolume
+    var float minVolume = candleVolume
+    var int volumeCalculationCount = 0
+    
+    if na(maxVolume) or na(minVolume)
+        maxVolume := candleVolume
+        minVolume := candleVolume
+        volumeCalculationCount := 1
+    else
+        maxVolume := math.max(maxVolume, candleVolume)
+        minVolume := math.min(minVolume, candleVolume)
+        volumeCalculationCount += 1
+    
+    if volumeCalculationCount >= candleCountMax and maxVolume != minVolume
+        volumeScore := (candleVolume - minVolume) / (maxVolume - minVolume) * 100
+    
+    importanceScore + volumeScore
+
+// ============================================================================
+// 9. العثور على الشمعة الأكثر أهمية | Find Most Important Candle
+// ============================================================================
+f_findMostImportantCandle(scores) =>
+    float maxScore = -1
+    int mostImportantIndex = na
+    for i = 0 to candleCountMax - 1
+        float score = array.get(scores, i)
+        if score > maxScore
+            maxScore := score
+            mostImportantIndex := i
+    mostImportantIndex
+
+// ============================================================================
+// 10. إدارة الخطوط والتسميات | Manage Lines and Labels
+// ============================================================================
+f_deleteAllLinesAndLabels() =>
+    line.delete(upperLine)
+    line.delete(lowerLine)
+    line.delete(middleLine)
+    label.delete(upperValueLabel)
+    label.delete(lowerValueLabel)
+    label.delete(buySignalLabel)
+    label.delete(sellSignalLabel)
+    for i = 0 to 7
+        line.delete(array.get(tpLinesUp, i))
+        line.delete(array.get(tpLinesDown, i))
+        label.delete(array.get(tpLabelsUp, i))
+        label.delete(array.get(tpLabelsDown, i))
+
+f_createTPLines(levelsUp, levelsDown, startIndex, extension, offset) =>
+    for i = 0 to 7
+        if array.get(tpEnabled, i)
+            float levelUp = array.get(levelsUp, i)
+            float levelDown = array.get(levelsDown, i)
+            line newLineUp = line.new(startIndex, levelUp, bar_index + extension, levelUp, color=tpLineColor, style=lineStyleSelected, width=lineWidth)
+            label newLabelUp = label.new(bar_index + offset, levelUp, 'TP' + str.tostring(i+1) + ': ' + str.tostring(levelUp, format.mintick), 
+                                       style=label.style_label_left, color=tpLineColor, textcolor=color.white, size=labelSizeSelected)
+            line newLineDown = line.new(startIndex, levelDown, bar_index + extension, levelDown, color=tpLineColor, style=lineStyleSelected, width=lineWidth)
+            label newLabelDown = label.new(bar_index + offset, levelDown, 'TP' + str.tostring(i+1) + ': ' + str.tostring(levelDown, format.mintick), 
+                                         style=label.style_label_left, color=tpLineColor, textcolor=color.white, size=labelSizeSelected)
+            array.set(tpLinesUp, i, newLineUp)
+            array.set(tpLabelsUp, i, newLabelUp)
+            array.set(tpLinesDown, i, newLineDown)
+            array.set(tpLabelsDown, i, newLabelDown)
+
+// ============================================================================
+// 11. منطق التداول | Trading Logic
+// ============================================================================
+importanceScore = f_calculateImportanceScore(open_tf, high_tf, low_tf, close_tf, volume_tf)
+
+if isStartOfPeriod
+    array.clear(candleOpen)
+    array.clear(candleHigh)
+    array.clear(candleLow)
+    array.clear(candleClose)
+    array.clear(candleVolume)
+    array.clear(candleIndex)
+    array.clear(candleScores)
+    candleCount := 0
+    candleProcessed := false
+    fixedImpHigh := na
+    fixedImpLow := na
+    fixedImpIndex := na
+    importantCandleIndex := na
+    f_deleteAllLinesAndLabels()
+
+if isWithinPeriod and new_candle and not na(high_tf) and not na(low_tf) and not na(close_tf) and not na(volume_tf) and candleCount < candleCountMax
+    array.push(candleOpen, open_tf)
+    array.push(candleHigh, high_tf)
+    array.push(candleLow, low_tf)
+    array.push(candleClose, close_tf)
+    array.push(candleVolume, volume_tf)
+    array.push(candleIndex, bar_index)
+    array.push(candleScores, importanceScore)
+    candleCount += 1
+
+importantCandleIndex := candleCount == candleCountMax ? f_findMostImportantCandle(candleScores) : importantCandleIndex
+
+if isAfterPeriod and candleCount == candleCountMax and not candleProcessed and not na(importantCandleIndex)
+    fixedImpHigh := array.get(candleHigh, importantCandleIndex)
+    fixedImpLow := array.get(candleLow, importantCandleIndex)
+    fixedImpIndex := array.get(candleIndex, importantCandleIndex)
+    upperLine := line.new(fixedImpIndex, fixedImpHigh, bar_index + maxLineExtension, fixedImpHigh, color=upperLineColor, width=lineWidth)
+    lowerLine := line.new(fixedImpIndex, fixedImpLow, bar_index + maxLineExtension, fixedImpLow, color=lowerLineColor, width=lineWidth)
+    // Add middle dashed line
+    float middlePrice = (fixedImpHigh + fixedImpLow) / 2
+    middleLine := line.new(fixedImpIndex, middlePrice, bar_index + maxLineExtension, middlePrice, color=color.gray, style=line.style_dashed, width=1)
+    
+    upperValueLabel := label.new(bar_index + maxLineExtension, fixedImpHigh, "CALL: " + str.tostring(fixedImpHigh, format.mintick), 
+                               style=label.style_label_left, color=upperLineColor, textcolor=color.white, size=labelSizeSelected)
+    lowerValueLabel := label.new(bar_index + maxLineExtension, fixedImpLow, "PUT: " + str.tostring(fixedImpLow, format.mintick), 
+                               style=label.style_label_left, color=lowerLineColor, textcolor=color.white, size=labelSizeSelected)
+    
+    var array<float> tpLevelsUp = array.new_float(8, na)
+    var array<float> tpLevelsDown = array.new_float(8, na)
+    for i = 0 to 7
+        float tpLevelUp = fixedImpHigh + (fixedImpHigh * tpPercentage / 100 * (i + 1))
+        float tpLevelDown = fixedImpLow - (fixedImpLow * tpPercentage / 100 * (i + 1))
+        array.set(tpLevelsUp, i, tpLevelUp)
+        array.set(tpLevelsDown, i, tpLevelDown)
+    f_createTPLines(tpLevelsUp, tpLevelsDown, fixedImpIndex, maxLineExtension, tpOffset)
+    candleProcessed := true
+
+crossoverSignal = ta.crossover(close, fixedImpHigh)
+crossunderSignal = ta.crossunder(close, fixedImpLow)
+buyCondition = not na(fixedImpHigh) and crossoverSignal and bar_index > fixedImpIndex
+sellCondition = not na(fixedImpLow) and crossunderSignal and bar_index > fixedImpIndex
+
+
+if buyCondition
+    for i = 0 to 7
+        line.delete(array.get(tpLinesUp, i))
+        line.delete(array.get(tpLinesDown, i))
+        label.delete(array.get(tpLabelsUp, i))
+        label.delete(array.get(tpLabelsDown, i))
+    label.delete(buySignalLabel)
+    label.delete(sellSignalLabel)
+    buySignalLabel := label.new(bar_index, low, "BUY", style=label.style_label_up, color=color.green, textcolor=color.white, size=labelSizeSelected)
+    var array<float> tpLevelsUp = array.new_float(8, na)
+    var array<float> tpLevelsDown = array.new_float(8, na)
+    if not na(fixedImpHigh) and not na(fixedImpLow)
+        for i = 0 to 7
+            float tpLevelUp = fixedImpHigh + (fixedImpHigh * tpPercentage / 100 * (i + 1))
+            float tpLevelDown = fixedImpLow - (fixedImpLow * tpPercentage / 100 * (i + 1))
+            array.set(tpLevelsUp, i, tpLevelUp)
+            array.set(tpLevelsDown, i, tpLevelDown)
+    f_createTPLines(tpLevelsUp, tpLevelsDown, fixedImpIndex, maxLineExtension, tpOffset)
+
+if sellCondition
+    for i = 0 to 7
+        line.delete(array.get(tpLinesUp, i))
+        line.delete(array.get(tpLinesDown, i))
+        label.delete(array.get(tpLabelsUp, i))
+        label.delete(array.get(tpLabelsDown, i))
+    label.delete(buySignalLabel)
+    label.delete(sellSignalLabel)
+    sellSignalLabel := label.new(bar_index, high, "SELL", style=label.style_label_down, color=color.red, textcolor=color.white, size=labelSizeSelected)
+    var array<float> tpLevelsUp = array.new_float(8, na)
+    var array<float> tpLevelsDown = array.new_float(8, na)
+    if not na(fixedImpHigh) and not na(fixedImpLow)
+        for i = 0 to 7
+            float tpLevelUp = fixedImpHigh + (fixedImpHigh * tpPercentage / 100 * (i + 1))
+            float tpLevelDown = fixedImpLow - (fixedImpLow * tpPercentage / 100 * (i + 1))
+            array.set(tpLevelsUp, i, tpLevelUp)
+            array.set(tpLevelsDown, i, tpLevelDown)
+    f_createTPLines(tpLevelsUp, tpLevelsDown, fixedImpIndex, maxLineExtension, tpOffset)
+
+// ============================================================================
+// 12. تحديث الخطوط والتسميات | Update Lines and Labels
+// ============================================================================
+if not na(upperLine) and not na(fixedImpHigh)
+    line.set_x2(upperLine, bar_index + maxLineExtension)
+    label.set_x(upperValueLabel, bar_index + maxLineExtension)
+if not na(lowerLine) and not na(fixedImpLow)
+    line.set_x2(lowerLine, bar_index + maxLineExtension)
+    label.set_x(lowerValueLabel, bar_index + maxLineExtension)
+if not na(middleLine) and not na(fixedImpHigh) and not na(fixedImpLow)
+    line.set_x2(middleLine, bar_index + maxLineExtension)
+for i = 0 to 7
+    if not na(array.get(tpLinesUp, i))
+        line.set_x2(array.get(tpLinesUp, i), bar_index + maxLineExtension)
+        label.set_x(array.get(tpLabelsUp, i), bar_index + tpOffset)
+    if not na(array.get(tpLinesDown, i))
+        line.set_x2(array.get(tpLinesDown, i), bar_index + maxLineExtension)
+        label.set_x(array.get(tpLabelsDown, i), bar_index + tpOffset)
+
+// ============================================================================
+// 13. التنبيهات | Alerts
+// ============================================================================
+alertcondition(buyCondition, title="Breakout Alert", message="اختراق لأعلى (BUY) ")
+alertcondition(sellCondition, title="Breakout Alert", message="كسر لأسفل (SELL) ")
+
+// ============================================================================
+// 14. إعدادات خطوط الاتجاه | Trend Line Settings
+// ============================================================================
+group_main = 'Main Trend Line Settings | إعدادات الخط الرئيسي'
+trendLineLength = input.int(4, title='Main Trend Line', minval=1, group=group_main, tooltip='طول الخط الرئيسي (عدد الشموع)')
+upTlBaseColorMain = input.color(#CDDC39, title='Bullish Main Trendline Color', group=group_main, tooltip='لون خطوط الاتجاه الصاعدة')
+downTlBaseColorMain = input.color(#CDDC39, title='Bearish Main Trendline Color', group=group_main, tooltip='لون خطوط الاتجاه الهابطة')
+styleMain = input.string(defval='solid', title='Main Trendline Style', options=['solid', 'dashed', 'dotted'], group=group_main, tooltip='نمط خطوط الاتجاه')
+
+// ============================================================================
+// 15. دوال خطوط الاتجاه | Trend Line Functions
+// ============================================================================
+priceToCheck(barsAgo) => close[barsAgo]
+getSlope(startIndex, startVal, endIndex, endVal) => (endVal - startVal) / (endIndex - startIndex)
+
+checkStrictMode(startIndex, endIndex, startVal, endVal, isBearish) =>
+    if endIndex <= startIndex
+        false
+    else
+        slope = (endVal - startVal) / float(endIndex - startIndex)
+        valid = true
+        barDistance = endIndex - startIndex
+        for offset = 0 to barDistance by 1
+            barsAgo = bar_index - (startIndex + offset)
+            if barsAgo < 0
+                continue
+            projectedVal = startVal + slope * offset
+            price = priceToCheck(barsAgo)
+            if isBearish
+                if price > projectedVal
+                    valid := false
+                    break
+            else
+                if price < projectedVal
+                    valid := false
+                    break
+        valid
+
+checkPostPivotBreak(startIndex, startVal, endIndex, slope, isBearish) =>
+    valid = true
+    barDistance = bar_index - endIndex
+    if barDistance <= 0
+        true
+    else
+        for offset = 1 to barDistance by 1
+            barsAgo = bar_index - (endIndex + offset)
+            if barsAgo < 0
+                continue
+            projectedVal = startVal + slope * (endIndex + offset - startIndex)
+            price = priceToCheck(barsAgo)
+            if isBearish
+                if price > projectedVal
+                    valid := false
+                    break
+            else
+                if price < projectedVal
+                    valid := false
+                    break
+        valid
+
+checkExtendedStrictMode(startIndex, startVal, slope, endIndex, isBearish) =>
+    if endIndex <= startIndex
+        false
+    else
+        valid = true
+        barDistance = endIndex - startIndex
+        for offset = 0 to barDistance by 1
+            barsAgo = bar_index - (startIndex + offset)
+            if barsAgo < 0
+                continue
+            projectedVal = startVal + slope * offset
+            price = priceToCheck(barsAgo)
+            if isBearish
+                if price > projectedVal
+                    valid := false
+                    break
+            else
+                if price < projectedVal
+                    valid := false
+                    break
+        valid
+
+extendTrendline(lineId, startIndex, startVal, slope, baseColor, isBroken, style, isBearish) =>
+    if not isBroken
+        newEndIndex = bar_index
+        newEndVal = startVal + slope * (newEndIndex - startIndex)
+        if checkExtendedStrictMode(startIndex, startVal, slope, newEndIndex, isBearish)
+            line.set_x2(lineId, newEndIndex)
+            line.set_y2(lineId, newEndVal)
+            line.set_color(lineId, baseColor)
+            line.set_style(lineId, style)
+        else
+            line.set_x2(lineId, bar_index - 1)
+            line.set_y2(lineId, startVal + slope * (bar_index - 1 - startIndex))
+
+getLineStyle(styleString) =>
+    switch styleString
+        'solid' => line.style_solid
+        'dashed' => line.style_dashed
+        'dotted' => line.style_dotted
+
+// ============================================================================
+// 16. كشف نقاط الـ Pivot ومنطق خطوط الاتجاه | Detect Pivot Points and Trend Line Logic
+// ============================================================================
+var line bearishStartLine = na
+var line bearishTrendLine = na
+var int bearStartIndex = na
+var float bearStartVal = na
+var int bearEndIndex = na
+var float bearEndVal = na
+var float bearSlope = na
+var bool bearishBreak = false
+var int lastBearPivot = na
+var int bearPivotCount = 0
+var line bullishStartLine = na
+var line bullishTrendLine = na
+var int bullStartIndex = na
+var float bullStartVal = na
+var int bullEndIndex = na
+var float bullEndVal = na
+var float bullSlope = na
+var bool bullishBreak = false
+var int lastBullPivot = na
+var int bullPivotCount = 0
+var bool breakoutBear = false
+var bool breakoutBull = false
+var label lastBearLabel = na
+var label lastBullLabel = na
+
+phMain = ta.pivothigh(high, trendLineLength, trendLineLength)
+plMain = ta.pivotlow(low, trendLineLength, trendLineLength)
+
+if not na(phMain)
+    bearPivotCount := bearPivotCount + 1
+bearPivotIndex = ta.valuewhen(not na(phMain), bar_index[trendLineLength], 0)
+bearPivotVal = ta.valuewhen(not na(phMain), high[trendLineLength], 0)
+bearPrevIndex = ta.valuewhen(not na(phMain), bar_index[trendLineLength], 1)
+bearPrevVal = ta.valuewhen(not na(phMain), high[trendLineLength], 1)
+if bearPivotCount >= 2 and not na(bearPrevIndex) and not na(bearPrevVal) and not na(bearPivotIndex) and not na(bearPivotVal)
+    if bearPivotIndex - bearPrevIndex <= trendLineLength * 5
+        currentSlope = getSlope(bearPrevIndex, bearPrevVal, bearPivotIndex, bearPivotVal)
+        if currentSlope < 0 and (na(lastBearPivot) or bearPrevIndex != lastBearPivot)
+            if checkStrictMode(bearPrevIndex, bearPivotIndex, bearPrevVal, bearPivotVal, true)
+                if checkPostPivotBreak(bearPrevIndex, bearPrevVal, bearPivotIndex, currentSlope, true)
+                    bearishBreak := false
+                    bearStartIndex := bearPrevIndex
+                    bearStartVal := bearPrevVal
+                    bearEndIndex := bearPivotIndex
+                    bearEndVal := bearPivotVal
+                    bearSlope := currentSlope
+                    if not na(bearishStartLine)
+                        line.delete(bearishStartLine)
+                        line.delete(bearishTrendLine)
+                        label.delete(lastBearLabel)
+                    bearishStartLine := line.new(x1=bearStartIndex, y1=bearStartVal, x2=bearEndIndex, y2=bearEndVal, xloc=xloc.bar_index, color=downTlBaseColorMain, width=2)
+                    bearishTrendLine := line.new(x1=bearEndIndex, y1=bearEndVal, x2=bar_index, y2=bearEndVal + bearSlope * (bar_index - bearEndIndex), xloc=xloc.bar_index, color=downTlBaseColorMain, width=2, style=getLineStyle(styleMain))
+                    lastBearPivot := bearPrevIndex
+                    bearPivotCount := 0
+
+if not na(plMain)
+    bullPivotCount := bullPivotCount + 1
+bullPivotIndex = ta.valuewhen(not na(plMain), bar_index[trendLineLength], 0)
+bullPivotVal = ta.valuewhen(not na(plMain), low[trendLineLength], 0)
+bullPrevIndex = ta.valuewhen(not na(plMain), bar_index[trendLineLength], 1)
+bullPrevVal = ta.valuewhen(not na(plMain), low[trendLineLength], 1)
+if bullPivotCount >= 2 and not na(bullPrevIndex) and not na(bullPrevVal) and not na(bullPivotIndex) and not na(bullPivotVal)
+    if bullPivotIndex - bullPrevIndex <= trendLineLength * 5
+        currentSlope = getSlope(bullPrevIndex, bullPrevVal, bullPivotIndex, bullPivotVal)
+        if currentSlope > 0 and (na(lastBullPivot) or bullPrevIndex != lastBullPivot)
+            if checkStrictMode(bullPrevIndex, bullPivotIndex, bullPrevVal, bullPivotVal, false)
+                if checkPostPivotBreak(bullPrevIndex, bullPrevVal, bullPivotIndex, currentSlope, false)
+                    bullishBreak := false
+                    bullStartIndex := bullPrevIndex
+                    bullStartVal := bullPrevVal
+                    bullEndIndex := bullPivotIndex
+                    bullEndVal := bullPivotVal
+                    bullSlope := currentSlope
+                    if not na(bullishStartLine)
+                        line.delete(bullishStartLine)
+                        line.delete(bullishTrendLine)
+                        label.delete(lastBullLabel)
+                    bullishStartLine := line.new(x1=bullStartIndex, y1=bullStartVal, x2=bullEndIndex, y2=bullEndVal, xloc=xloc.bar_index, color=upTlBaseColorMain, width=2)
+                    bullishTrendLine := line.new(x1=bullEndIndex, y1=bullEndVal, x2=bar_index, y2=bullEndVal + bullSlope * (bar_index - bullEndIndex), xloc=xloc.bar_index, color=upTlBaseColorMain, width=2, style=getLineStyle(styleMain))
+                    lastBullPivot := bullPrevIndex
+                    bullPivotCount := 0
+
+if not na(bearishTrendLine)
+    currentBearLevel = bearStartVal + bearSlope * (bar_index - bearStartIndex)
+    confirmation = barstate.isconfirmed
+    breakCondition = close > currentBearLevel
+    if breakCondition and confirmation and not bearishBreak
+        bearishBreak := true
+        breakoutBear := true
+        line.set_x2(bearishTrendLine, bar_index)
+        line.set_y2(bearishTrendLine, currentBearLevel)
+
+if not na(bullishTrendLine)
+    currentBullLevel = bullStartVal + bullSlope * (bar_index - bullStartIndex)
+    confirmation = barstate.isconfirmed
+    breakCondition = close < currentBullLevel
+    if breakCondition and confirmation and not bullishBreak
+        bullishBreak := true
+        breakoutBull := true
+        line.set_x2(bullishTrendLine, bar_index)
+        line.set_y2(bullishTrendLine, currentBullLevel)
+
+if not na(bearishTrendLine)
+    extendTrendline(bearishTrendLine, bearStartIndex, bearStartVal, bearSlope, downTlBaseColorMain, bearishBreak, getLineStyle(styleMain), true)
+if not na(bullishTrendLine)
+    extendTrendline(bullishTrendLine, bullStartIndex, bullStartVal, bullSlope, upTlBaseColorMain, bullishBreak, getLineStyle(styleMain), false)
